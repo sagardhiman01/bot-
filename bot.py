@@ -574,12 +574,6 @@ def send_prediction_output(user_id, game_mode):
         'predicted_size':  analysis['predicted_size'],
     }
 
-    # Next period estimate
-    last_period = history[-1].get('period', '???')
-    try:
-        next_period = str(int(last_period) + 1)
-    except:
-        next_period = last_period
 
     # Color display
     c = analysis['predicted_color']
@@ -636,7 +630,7 @@ def send_prediction_output(user_id, game_mode):
     text = (
         "⚡️ <b>RAJA CLUB — VIP AI PREDICTION ENGINE v2</b> ⚡️\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"📝 <b>Mode:</b> {game_mode}   |   🆔 <b>Next Period:</b> <code>{next_period}</code>\n\n"
+        f"📝 <b>Mode:</b> {game_mode}\n\n"
 
         f"📊 <b>Last 8 Results (oldest→latest):</b>\n"
         f"{history_strip}\n\n"
