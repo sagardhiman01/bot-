@@ -56,6 +56,21 @@ def init_db():
             cursor.execute("ALTER TABLE users ADD COLUMN share_count INTEGER DEFAULT 0")
         except:
             pass
+        # Create Prediction Results Table (for self-learning)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS prediction_results (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                mode TEXT,
+                predicted_color TEXT,
+                actual_color TEXT,
+                color_correct INTEGER DEFAULT 0,
+                predicted_size TEXT,
+                actual_size TEXT,
+                size_correct INTEGER DEFAULT 0,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
         conn.commit()
         conn.close()
 
@@ -342,6 +357,48 @@ def play_and_earn(message):
     bot.send_message(user_id, text, reply_markup=markup)
 
 # ==========================================
+# PREDICTION DB HELPERS
+# ==========================================
+def save_prediction_result(user_id, mode, pred_color, actual_color, pred_size, actual_size):
+    """Save actual result and return (color_correct, size_correct)."""
+    color_correct = 1 if pred_color == actual_color else 0
+    size_correct  = 1 if pred_size  == actual_size  else 0
+    with db_lock:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO prediction_results
+            (user_id, mode, predicted_color, actual_color, color_correct, predicted_size, actual_size, size_correct)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (user_id, mode, pred_color, actual_color, color_correct, pred_size, actual_size, size_correct))
+        conn.commit()
+        conn.close()
+    return color_correct, size_correct
+
+def get_accuracy_stats(mode, limit=20):
+    """Get recent prediction accuracy to adapt engine weights."""
+    with db_lock:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT color_correct, size_correct FROM prediction_results
+            WHERE mode = ? ORDER BY timestamp DESC LIMIT ?
+        ''', (mode, limit))
+        rows = cursor.fetchall()
+        conn.close()
+    if not rows:
+        return {'color_acc': 0.5, 'size_acc': 0.5, 'total': 0}
+    total = len(rows)
+    return {
+        'color_acc': sum(r['color_correct'] for r in rows) / total,
+        'size_acc':  sum(r['size_correct']  for r in rows) / total,
+        'total': total
+    }
+
+# In-memory store: pending feedback per user
+pending_feedback = {}
+
+# ==========================================
 # RAJA CLUB VIP PREDICTION SYSTEM (v2 - Advanced Engine)
 # ==========================================
 import requests
@@ -485,8 +542,10 @@ def deep_analyze(history):
 def send_prediction_output(user_id, game_mode):
     bot.send_message(user_id, "⏳ <b>Deep analyzing live data (30 rounds)...</b>\n<i>Please wait a few seconds.</i>")
 
-    modes_map = {'Win Go 1 Min': 1, 'Win Go 3 Min': 3, 'Win Go 5 Min': 5, 'Win Go 10 Min': 10}
+    modes_map  = {'Win Go 1 Min': 1, 'Win Go 3 Min': 3, 'Win Go 5 Min': 5, 'Win Go 10 Min': 10}
+    modes_short= {1: 'wg1', 3: 'wg3', 5: 'wg5', 10: 'wg10'}
     market = modes_map.get(game_mode, 1)
+    mode_key = modes_short.get(market, 'wg1')
 
     history = fetch_history(market, 30)
     if not history:
@@ -497,6 +556,23 @@ def send_prediction_output(user_id, game_mode):
     if not analysis:
         bot.send_message(user_id, "❌ <b>Error:</b> Analysis failed.")
         return
+
+    # ── Adaptive confidence from past feedback data ──────────────────────────
+    stats = get_accuracy_stats(mode_key)
+    if stats['total'] >= 5:
+        avg_acc = (stats['color_acc'] + stats['size_acc']) / 2
+        if avg_acc > 0.65:
+            analysis['confidence'] = min(95, analysis['confidence'] + 5)
+        elif avg_acc < 0.40:
+            analysis['confidence'] = max(65, analysis['confidence'] - 4)
+
+    # ── Store prediction for feedback later ──────────────────────────────────
+    pending_feedback[user_id] = {
+        'mode_key':        mode_key,
+        'game_mode':       game_mode,
+        'predicted_color': analysis['predicted_color'],
+        'predicted_size':  analysis['predicted_size'],
+    }
 
     # Next period estimate
     last_period = history[-1].get('period', '???')
@@ -540,13 +616,22 @@ def send_prediction_output(user_id, game_mode):
     confidence_bar = "█" * (conf // 10) + "░" * (10 - conf // 10)
 
     # Inline buttons
-    modes_short = {1: 'wg1', 3: 'wg3', 5: 'wg5', 10: 'wg10'}
-    mode_short = modes_short.get(market, 'wg1')
     markup = InlineKeyboardMarkup()
     markup.add(
-        InlineKeyboardButton("🔄 Refresh Next Period", callback_data=f"next_{mode_short}"),
+        InlineKeyboardButton("🔄 Refresh Next Period", callback_data=f"next_{mode_key}"),
         InlineKeyboardButton("🎮 Change Mode", callback_data="change_mode")
     )
+
+    # Accuracy footer (if we have feedback data)
+    acc_footer = ""
+    stats = get_accuracy_stats(mode_key)
+    if stats['total'] > 0:
+        cacc = round(stats['color_acc'] * 100)
+        sacc = round(stats['size_acc']  * 100)
+        acc_footer = (
+            f"\n📈 <b>AI Self-Learning Stats ({stats['total']} rounds):</b>\n"
+            f"  🎨 Color Accuracy: <b>{cacc}%</b>  |  📏 Size Accuracy: <b>{sacc}%</b>"
+        )
 
     text = (
         "⚡️ <b>RAJA CLUB — VIP AI PREDICTION ENGINE v2</b> ⚡️\n"
@@ -570,7 +655,8 @@ def send_prediction_output(user_id, game_mode):
         f"♻️ <b>Parity:</b> {analysis['predicted_parity']}\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n"
         f"🚀 <b>AI Confidence:</b> {conf}%\n"
-        f"<code>[{confidence_bar}]</code>\n\n"
+        f"<code>[{confidence_bar}]</code>"
+        f"{acc_footer}\n\n"
 
         "📊 <b>Martingale Guide:</b>\n"
         "• <b>Bet 1:</b> ₹10  → <b>Bet 2:</b> ₹30  → <b>Bet 3:</b> ₹90\n"
@@ -611,19 +697,130 @@ def handle_prediction_callbacks(call):
         bot.send_message(user_id, "🎮 <b>Select Game Mode for Prediction:</b>", reply_markup=markup)
         bot.answer_callback_query(call.id)
         return
-        
+
     parts = call.data.split("_")
     mode_key = parts[1]
-    
-    modes = {
-        'wg1': 'Win Go 1 Min',
-        'wg3': 'Win Go 3 Min',
-        'wg5': 'Win Go 5 Min',
-        'wg10': 'Win Go 10 Min'
-    }
+    modes = {'wg1': 'Win Go 1 Min', 'wg3': 'Win Go 3 Min', 'wg5': 'Win Go 5 Min', 'wg10': 'Win Go 10 Min'}
     game_mode = modes.get(mode_key, 'Win Go 1 Min')
-    
+
+    # ── If there is a pending prediction, ask for feedback first ────────────
+    if user_id in pending_feedback:
+        pf = pending_feedback[user_id]
+        pc = pf['predicted_color']
+        ps = pf['predicted_size']
+        c_emoji = {"Red": "🔴", "Green": "🟢", "Violet": "🟣"}.get(pc, "")
+
+        markup = InlineKeyboardMarkup()
+        markup.add(
+            InlineKeyboardButton("🔴 Red",    callback_data=f"fb_c_R_{mode_key}"),
+            InlineKeyboardButton("🟢 Green",  callback_data=f"fb_c_G_{mode_key}"),
+            InlineKeyboardButton("🟣 Violet", callback_data=f"fb_c_V_{mode_key}")
+        )
+        markup.add(InlineKeyboardButton("⏭ Skip & Get Next", callback_data=f"fb_skip_{mode_key}"))
+
+        bot.answer_callback_query(call.id)
+        bot.send_message(
+            user_id,
+            f"📋 <b>Quick Feedback — Previous Round</b>\n\n"
+            f"🤖 AI predicted: <b>{pc} {c_emoji}</b>  |  <b>{ps}</b>\n\n"
+            f"🎯 <b>What color ACTUALLY came?</b>\n"
+            f"<i>(Your feedback trains the AI!)</i>",
+        reply_markup=markup
+        )
+        return
+
     bot.answer_callback_query(call.id)
+    send_prediction_output(user_id, game_mode)
+
+# ── Feedback: Color selection ────────────────────────────────────────────────
+@bot.callback_query_handler(func=lambda call: call.data.startswith("fb_c_"))
+def feedback_color(call):
+    user_id = call.message.chat.id
+    parts = call.data.split("_")   # fb_c_R_wg1
+    color_code = parts[2]
+    mode_key   = parts[3]
+    color_map  = {"R": "Red", "G": "Green", "V": "Violet"}
+    actual_color = color_map.get(color_code, "Red")
+
+    if user_id in pending_feedback:
+        pending_feedback[user_id]['actual_color'] = actual_color
+
+    markup = InlineKeyboardMarkup()
+    markup.add(
+        InlineKeyboardButton("📈 Big",   callback_data=f"fb_s_B_{mode_key}"),
+        InlineKeyboardButton("📉 Small", callback_data=f"fb_s_S_{mode_key}")
+    )
+    bot.answer_callback_query(call.id)
+    bot.edit_message_text(
+        f"✅ Color noted: <b>{actual_color}</b>\n\n"
+        f"📏 <b>What SIZE (Big/Small) actually came?</b>",
+        call.message.chat.id, call.message.message_id,
+        reply_markup=markup
+    )
+
+# ── Feedback: Size selection ─────────────────────────────────────────────────
+@bot.callback_query_handler(func=lambda call: call.data.startswith("fb_s_"))
+def feedback_size(call):
+    user_id  = call.message.chat.id
+    parts    = call.data.split("_")   # fb_s_B_wg1
+    size_code= parts[2]
+    mode_key = parts[3]
+    size_map = {"B": "Big", "S": "Small"}
+    actual_size = size_map.get(size_code, "Big")
+    modes = {'wg1': 'Win Go 1 Min', 'wg3': 'Win Go 3 Min', 'wg5': 'Win Go 5 Min', 'wg10': 'Win Go 10 Min'}
+    game_mode = modes.get(mode_key, 'Win Go 1 Min')
+
+    if user_id in pending_feedback:
+        pf = pending_feedback.pop(user_id)
+        actual_color   = pf.get('actual_color', '')
+        pred_color     = pf.get('predicted_color', '')
+        pred_size      = pf.get('predicted_size', '')
+
+        color_correct, size_correct = save_prediction_result(
+            user_id, mode_key, pred_color, actual_color, pred_size, actual_size
+        )
+
+        c_emoji = {"Red": "🔴", "Green": "🟢", "Violet": "🟣"}
+        c_win   = "✅ WIN" if color_correct else "❌ MISS"
+        s_win   = "✅ WIN" if size_correct  else "❌ MISS"
+
+        if color_correct and size_correct:
+            verdict = "🎉 <b>Perfect call! AI confidence boosted.</b>"
+        elif color_correct or size_correct:
+            verdict = "👍 <b>Partial hit! AI recalibrating weights...</b>"
+        else:
+            verdict = "🔄 <b>Both missed. AI learning from mistake...</b>"
+
+        result_text = (
+            f"📊 <b>Round Result Recorded</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🎨 Color → Predicted: <b>{pred_color}</b>  |  Actual: <b>{actual_color}</b>  {c_win}\n"
+            f"📏 Size  → Predicted: <b>{pred_size}</b>   |  Actual: <b>{actual_size}</b>  {s_win}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"{verdict}\n\n"
+            f"<i>⏳ Fetching next prediction now...</i>"
+        )
+        bot.answer_callback_query(call.id)
+        bot.edit_message_text(result_text, call.message.chat.id, call.message.message_id)
+        # Slight delay then show next prediction
+        threading.Timer(1.2, send_prediction_output, args=[user_id, game_mode]).start()
+    else:
+        bot.answer_callback_query(call.id)
+        send_prediction_output(user_id, game_mode)
+
+# ── Feedback: Skip ───────────────────────────────────────────────────────────
+@bot.callback_query_handler(func=lambda call: call.data.startswith("fb_skip_"))
+def feedback_skip(call):
+    user_id  = call.message.chat.id
+    mode_key = call.data.split("_")[2]
+    modes    = {'wg1': 'Win Go 1 Min', 'wg3': 'Win Go 3 Min', 'wg5': 'Win Go 5 Min', 'wg10': 'Win Go 10 Min'}
+    game_mode= modes.get(mode_key, 'Win Go 1 Min')
+    pending_feedback.pop(user_id, None)
+    bot.answer_callback_query(call.id)
+    try:
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+    except:
+        pass
     send_prediction_output(user_id, game_mode)
 
 @bot.callback_query_handler(func=lambda call: call.data == "action_share")
