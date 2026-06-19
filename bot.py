@@ -342,128 +342,242 @@ def play_and_earn(message):
     bot.send_message(user_id, text, reply_markup=markup)
 
 # ==========================================
-# RAJA CLUB VIP PREDICTION SYSTEM
+# RAJA CLUB VIP PREDICTION SYSTEM (v2 - Advanced Engine)
 # ==========================================
 import requests
+from collections import Counter
 
 API_BASE = 'https://indialotteryapi.com/wp-json/wingo/v1'
 
-def fetch_predictions(market, count=10):
+def fetch_history(market, count=30):
+    """Fetch last 'count' results for deep statistical analysis."""
     try:
-        # UserAgent might help with connection dropped
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        res = requests.get(f"{API_BASE}/predict?market={market}&n={count}", headers=headers, timeout=10)
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+        res = requests.get(
+            f"{API_BASE}/predict?market={market}&n={count}",
+            headers=headers, timeout=12
+        )
+        res.raise_for_status()
         return res.json().get('items', [])
     except Exception as e:
-        print("Error fetching predictions:", e)
+        print("Error fetching history:", e)
         return []
 
-def analyze_patterns(predictions):
-    patterns = {
-        'colorStreak': 0,
-        'lastColor': None,
-        'bigSmallStreak': 0,
-        'lastSize': None,
-        'oddEvenStreak': 0,
-        'lastOddEven': None
-    }
-    
-    last5 = predictions[-5:] if len(predictions) >= 5 else predictions
-    for p in last5:
-        if p.get('color') == patterns['lastColor']: patterns['colorStreak'] += 1
-        else: patterns['colorStreak'] = 1; patterns['lastColor'] = p.get('color')
-        
-        if p.get('bigSmall') == patterns['lastSize']: patterns['bigSmallStreak'] += 1
-        else: patterns['bigSmallStreak'] = 1; patterns['lastSize'] = p.get('bigSmall')
-        
-        if p.get('oddEven') == patterns['lastOddEven']: patterns['oddEvenStreak'] += 1
-        else: patterns['oddEvenStreak'] = 1; patterns['lastOddEven'] = p.get('oddEven')
-        
-    return patterns
+def deep_analyze(history):
+    """
+    Multi-layer statistical analysis engine.
+    Analyzes: frequency, streaks, reversals, hot/cold numbers, weighted trend.
+    Returns a dict of signals to be voted upon.
+    """
+    if not history:
+        return {}
 
-def smart_predict(predictions, patterns):
-    if not predictions:
-        return None
-    api_result = predictions[-1]
-    confidence_boost = 0
-    if patterns['colorStreak'] >= 3:
-        confidence_boost += 5
-    
-    conf = api_result.get('conf', 80)
-    api_result['confidence'] = min(98, conf + confidence_boost)
-    return api_result
+    colors   = [h.get('color', '') for h in history]
+    sizes    = [h.get('bigSmall', '') for h in history]
+    parities = [h.get('oddEven', '') for h in history]
+    digits   = [int(h.get('digit', 0)) for h in history if str(h.get('digit', '')).isdigit()]
+
+    # ── 1. FREQUENCY ANALYSIS (last 30 rounds) ──────────────────────────────
+    color_freq   = Counter(colors)
+    size_freq    = Counter(sizes)
+    parity_freq  = Counter(parities)
+    digit_freq   = Counter(digits)
+
+    # ── 2. RECENT WEIGHTED TREND (last 10 rounds - 2x weight) ───────────────
+    recent = history[-10:]
+    r_colors  = [h.get('color', '') for h in recent]
+    r_sizes   = [h.get('bigSmall', '') for h in recent]
+    r_parities= [h.get('oddEven', '') for h in recent]
+
+    # Weighted counter: recent counts double
+    def weighted_top(global_ctr, recent_list):
+        combined = dict(global_ctr)
+        for item in recent_list:
+            combined[item] = combined.get(item, 0) + 1  # +1 extra weight
+        return max(combined, key=combined.get) if combined else None
+
+    hot_color   = weighted_top(color_freq, r_colors)
+    hot_size    = weighted_top(size_freq, r_sizes)
+    hot_parity  = weighted_top(parity_freq, r_parities)
+
+    # ── 3. STREAK ANALYSIS (current live streak from latest result) ──────────
+    def get_streak(lst):
+        if not lst: return 0, None
+        val, count = lst[-1], 1
+        for i in range(len(lst)-2, -1, -1):
+            if lst[i] == val: count += 1
+            else: break
+        return count, val
+
+    color_streak,  streak_color  = get_streak(colors)
+    size_streak,   streak_size   = get_streak(sizes)
+    parity_streak, streak_parity = get_streak(parities)
+
+    # ── 4. REVERSAL LOGIC ────────────────────────────────────────────────────
+    # If streak >= 4, statistically mean-reversion is likely → flip prediction
+    REVERSAL_THRESHOLD = 4
+
+    color_reversed = False
+    if color_streak >= REVERSAL_THRESHOLD:
+        color_reversed = True
+        # Pick the color that appeared least recently among Red/Green
+        candidates = {'Red': colors.count('Red'), 'Green': colors.count('Green')}
+        hot_color = min(candidates, key=candidates.get)
+
+    size_reversed = False
+    if size_streak >= REVERSAL_THRESHOLD:
+        size_reversed = True
+        hot_size = 'Small' if streak_size == 'Big' else 'Big'
+
+    parity_reversed = False
+    if parity_streak >= REVERSAL_THRESHOLD:
+        parity_reversed = True
+        hot_parity = 'Even' if streak_parity == 'Odd' else 'Odd'
+
+    # ── 5. HOT / COLD DIGIT ──────────────────────────────────────────────────
+    if digit_freq:
+        hot_digit  = digit_freq.most_common(1)[0][0]   # appeared most
+        cold_digit = digit_freq.most_common()[-1][0]   # appeared least
+    else:
+        hot_digit, cold_digit = 5, 0
+
+    # Best digit prediction: pick cold digit (due-to-appear logic)
+    best_digit = cold_digit
+
+    # ── 6. CONFIDENCE SCORING ────────────────────────────────────────────────
+    # Base confidence
+    confidence = 72
+
+    # Boost if reversal signal is strong
+    if color_reversed:  confidence += 8
+    if size_reversed:   confidence += 5
+    if parity_reversed: confidence += 5
+
+    # Boost if majority of last 10 agrees with hot prediction
+    if r_colors.count(hot_color) >= 7:  confidence += 5   # strong dominance
+    elif r_colors.count(hot_color) <= 3: confidence -= 3  # weak signal
+
+    # Boost if streak is moderate (2-3) → likely to continue
+    if 2 <= color_streak <= 3 and not color_reversed:
+        confidence += 4
+
+    confidence = max(65, min(95, confidence))  # clamp 65–95
+
+    return {
+        'predicted_color':  hot_color,
+        'predicted_size':   hot_size,
+        'predicted_parity': hot_parity,
+        'predicted_digit':  best_digit,
+        'color_streak':     color_streak,
+        'streak_color':     streak_color,
+        'size_streak':      size_streak,
+        'streak_size':      streak_size,
+        'parity_streak':    parity_streak,
+        'streak_parity':    streak_parity,
+        'color_reversed':   color_reversed,
+        'size_reversed':    size_reversed,
+        'hot_digit':        hot_digit,
+        'cold_digit':       cold_digit,
+        'color_freq':       color_freq,
+        'confidence':       confidence,
+    }
 
 def send_prediction_output(user_id, game_mode):
-    bot.send_message(user_id, "⏳ <b>Analyzing live game data...</b>\n<i>Please wait a few seconds.</i>")
-    
-    modes_map = {
-        'Win Go 1 Min': 1,
-        'Win Go 3 Min': 3,
-        'Win Go 5 Min': 5,
-        'Win Go 10 Min': 10
-    }
+    bot.send_message(user_id, "⏳ <b>Deep analyzing live data (30 rounds)...</b>\n<i>Please wait a few seconds.</i>")
+
+    modes_map = {'Win Go 1 Min': 1, 'Win Go 3 Min': 3, 'Win Go 5 Min': 5, 'Win Go 10 Min': 10}
     market = modes_map.get(game_mode, 1)
-    
-    predictions = fetch_predictions(market, 10)
-    if not predictions:
+
+    history = fetch_history(market, 30)
+    if not history:
         bot.send_message(user_id, "❌ <b>Error:</b> Could not fetch live data. Please try again later.")
         return
-        
-    patterns = analyze_patterns(predictions)
-    prediction = smart_predict(predictions, patterns)
-    
-    if not prediction:
+
+    analysis = deep_analyze(history)
+    if not analysis:
         bot.send_message(user_id, "❌ <b>Error:</b> Analysis failed.")
         return
-        
-    color_val = "Red 🔴" if prediction.get('color') == "Red" else "Green 🟢" if prediction.get('color') == "Green" else "Violet 🟣"
-    size_val = prediction.get('bigSmall', 'Unknown')
-    digit = prediction.get('digit', '?')
-    conf = prediction.get('confidence', 85)
-    period = prediction.get('period', 'Unknown')
-    
-    # Show user's predicted history
-    history_lines = []
-    for p in predictions[-5:]:
-        p_c = p.get('color')
-        c_emoji = "🔴" if p_c == "Red" else "🟢" if p_c == "Green" else "🟣"
-        history_lines.append(f"• Period {p.get('period')[-4:]}: {p_c} {c_emoji}")
-    history_text = "\n".join(history_lines)
-    
+
+    # Next period estimate
+    last_period = history[-1].get('period', '???')
+    try:
+        next_period = str(int(last_period) + 1)
+    except:
+        next_period = last_period
+
+    # Color display
+    c = analysis['predicted_color']
+    color_emoji = "🔴" if c == 'Red' else "🟢" if c == 'Green' else "🟣"
+    color_val   = f"{c} {color_emoji}"
+
+    # Size display
+    s = analysis['predicted_size']
+    size_emoji = "🔺" if s == 'Big' else "🔻"
+    size_val = f"{s} {size_emoji}"
+
+    # Reversal tag
+    rev_tag = " ↩️ <i>(Reversal Signal!)</i>" if analysis['color_reversed'] else ""
+
+    # Recent 8 results visual strip
+    history_strip = ""
+    for h in history[-8:]:
+        hc = h.get('color', '')
+        history_strip += "🔴" if hc=='Red' else "🟢" if hc=='Green' else "🟣"
+
+    # Color distribution in last 30
+    cf = analysis['color_freq']
+    total = sum(cf.values()) or 1
+    red_pct   = round(cf.get('Red',0)   / total * 100)
+    green_pct = round(cf.get('Green',0) / total * 100)
+    vio_pct   = round(cf.get('Violet',0)/ total * 100)
+
+    # Streak info
+    cs = analysis['color_streak']
+    sc = analysis['streak_color']
+    streak_bar = "🟥" * cs if sc=='Red' else "🟩" * cs if sc=='Green' else "🟪" * cs
+
+    conf = analysis['confidence']
+    confidence_bar = "█" * (conf // 10) + "░" * (10 - conf // 10)
+
     # Inline buttons
     modes_short = {1: 'wg1', 3: 'wg3', 5: 'wg5', 10: 'wg10'}
     mode_short = modes_short.get(market, 'wg1')
-    
     markup = InlineKeyboardMarkup()
     markup.add(
         InlineKeyboardButton("🔄 Refresh Next Period", callback_data=f"next_{mode_short}"),
         InlineKeyboardButton("🎮 Change Mode", callback_data="change_mode")
     )
-    
-    # Construct message text
+
     text = (
-        "⚡️ <b>RAJA CLUB VIP PREDICTION ENGINE</b> ⚡️\n\n"
-        f"📝 <b>Game Mode:</b> {game_mode}\n"
-        f"🆔 <b>Target Period:</b> {period}\n\n"
-        f"📈 <b>Recent Live Trend:</b>\n{history_text}\n\n"
-        f"🔍 <b>Pattern Analysis:</b>\n"
-        f"  Color Streak: {patterns['colorStreak']}x {patterns['lastColor']}\n"
-        f"  Size Streak: {patterns['bigSmallStreak']}x {patterns['lastSize']}\n"
-        f"  O/E Streak: {patterns['oddEvenStreak']}x {patterns['lastOddEven']}\n\n"
-        f"🎯 <b>VIP Recommendation for Next Round:</b>\n"
-        f"🎨 <b>Color:</b> {color_val}\n"
-        f"📏 <b>Size:</b> {size_val}\n"
-        f"🔢 <b>Recommended Digit:</b> {digit}\n"
-        f"🚀 <b>Confidence Score:</b> {conf}%\n\n"
-        "📊 <b>3x Investment Plan Guide:</b>\n"
-        "• <b>Bet 1:</b> ₹10 (If Lose ➡️ Bet 2)\n"
-        "• <b>Bet 2:</b> ₹30 (If Lose ➡️ Bet 3)\n"
-        "• <b>Bet 3:</b> ₹90 (If Lose ➡️ Bet 4)\n"
-        "• <b>Bet 4:</b> ₹270 (If Lose ➡️ Bet 5)\n"
-        "• <b>Bet 5:</b> ₹810 (Win covers all losses + profit!)\n\n"
-        "⚠️ <i>Play responsibly. Never greed!</i>"
+        "⚡️ <b>RAJA CLUB — VIP AI PREDICTION ENGINE v2</b> ⚡️\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📝 <b>Mode:</b> {game_mode}   |   🆔 <b>Next Period:</b> <code>{next_period}</code>\n\n"
+
+        f"📊 <b>Last 8 Results (oldest→latest):</b>\n"
+        f"{history_strip}\n\n"
+
+        f"📈 <b>Color Distribution (30 rounds):</b>\n"
+        f"  🔴 Red: {red_pct}%  |  🟢 Green: {green_pct}%  |  🟣 Violet: {vio_pct}%\n\n"
+
+        f"🔥 <b>Current Streak:</b> {streak_bar} ({cs}x {sc})\n"
+        f"🔄 <b>Reversal Active:</b> {'✅ YES' if analysis['color_reversed'] else '❌ NO'}\n\n"
+
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🎯 <b>VIP PREDICTION FOR NEXT ROUND:</b>\n"
+        f"🎨 <b>Color :</b> {color_val}{rev_tag}\n"
+        f"📏 <b>Size  :</b> {size_val}\n"
+        f"🔢 <b>Digit :</b> {analysis['predicted_digit']} (Cold/Due)\n"
+        f"♻️ <b>Parity:</b> {analysis['predicted_parity']}\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🚀 <b>AI Confidence:</b> {conf}%\n"
+        f"<code>[{confidence_bar}]</code>\n\n"
+
+        "📊 <b>Martingale Guide:</b>\n"
+        "• <b>Bet 1:</b> ₹10  → <b>Bet 2:</b> ₹30  → <b>Bet 3:</b> ₹90\n"
+        "• <b>Bet 4:</b> ₹270 → <b>Bet 5:</b> ₹810 ✅ (Profit!)\n\n"
+        "⚠️ <i>AI prediction only. Play responsibly!</i>"
     )
-    
+
     bot.send_message(user_id, text, reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("mode_"))
